@@ -25,14 +25,17 @@ from pplr.utils.data.preprocessor import Preprocessor
 from pplr.utils.logging import Logger
 from pplr.utils.faiss_rerank import compute_ranked_list, compute_jaccard_distance
 
-best_mAP = 0
+"""
+Cause the data size of ai-hub is too big, it causes process kill during DBSCAN phase
+Therefore, in this script we will gonna split training data, and then clustering the data points
+"""
 
+best_mAP = 0
 
 def get_data(name, data_dir):
     root = data_dir
     dataset = datasets.create(name, root)
     return dataset
-
 
 def get_train_loader(dataset, height, width, batch_size, workers,
                      num_instances, iters, trainset=None):
@@ -55,13 +58,14 @@ def get_train_loader(dataset, height, width, batch_size, workers,
         sampler = RandomMultipleGallerySampler(train_set, num_instances)
     else:
         sampler = None
+    
+    iters = len(train_set) // batch_size
     train_loader = IterLoader(
                 DataLoader(Preprocessor(train_set, root=dataset.images_dir, transform=train_transformer),
                            batch_size=batch_size, num_workers=workers, sampler=sampler,
                            shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
 
     return train_loader
-
 
 def get_test_loader(dataset, height, width, batch_size, workers, testset=None):
     normalizer = T.Normalize(mean=[0.485, 0.456, 0.406],
@@ -83,7 +87,6 @@ def get_test_loader(dataset, height, width, batch_size, workers, testset=None):
 
     return test_loader
 
-
 def compute_pseudo_labels(features, cluster, k1):
     mat_dist = compute_jaccard_distance(features, k1=k1, k2=6)
     ids = cluster.fit_predict(mat_dist)
@@ -100,10 +103,9 @@ def compute_pseudo_labels(features, cluster, k1):
 
     return torch.Tensor(labels).long().detach(), num_ids
 
-
 def compute_cross_agreement(features_g, features_p, k, search_option=0):
     print("Compute cross agreement score...")
-    N, D, P = features_p.size() # N = # of sample, D = # of feature, P = # of part
+    N, D, P = features_p.size()
     score = torch.FloatTensor()
     end = time.time()
     ranked_list_g = compute_ranked_list(features_g, k=k, search_option=search_option, verbose=False)
@@ -120,7 +122,6 @@ def compute_cross_agreement(features_g, features_p, k, search_option=0):
     print("Cross agreement score time cost: {}".format(time.time() - end))
     return score
 
-
 def main():
     args = parser.parse_args()
 
@@ -135,7 +136,6 @@ def main():
 
     main_worker(args)
 
-
 def main_worker(args):
     global best_mAP
 
@@ -144,15 +144,27 @@ def main_worker(args):
     sys.stdout = Logger(osp.join(args.logs_dir, 'log.txt'))
     print("==========\nArgs:{}\n==========".format(args))
 
-    # dataset
+    # prepare dataset
     dataset = get_data(args.dataset, args.data_dir)
-    test_loader = get_test_loader(dataset, args.height, args.width, args.batch_size, args.workers)
-    cluster_loader = get_test_loader(dataset, args.height, args.width, args.batch_size, args.workers,
-                                     testset=sorted(dataset.train))
+    # load query & gallery data
+    test_loader = get_test_loader(dataset, args.height, args.width, args.batch_size, args.workers) 
+
+    # get total num of train_data
+    num_of_train = len(dataset.train)
+    np.random.shuffle(dataset.train)
+    # get train split idxes
+    train_idxes = np.arange(num_of_train)
+    splits = [(num_of_train // args.split) * (i + 1) for i in range(args.split)]
+    if splits[-1] == num_of_train:
+        train_splits = np.split(train_idxes, splits)[:-1]
+    else:
+        splits.append(num_of_train)
+        train_splits = np.split(train_idxes, splits)[:-2]
 
     # model
     num_part = args.part
-    model = resnet50part(num_parts=args.part, num_classes=3000)
+    model = resnet50part()
+    model = resnet50part(num_parts=args.part, num_classes=args.num_classes)
     model.cuda()
     model = nn.DataParallel(model)
 
@@ -164,91 +176,108 @@ def main_worker(args):
     for key, value in model.named_parameters():
         if not value.requires_grad:
             continue
-        params += [{"params": [value], "lr": args.lr, "weight_decay": args.weight_decay}]
+        params += [{"params": [value], "lr":args.lr, "weight_decay": args.weight_decay}]
     optimizer = torch.optim.Adam(params)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=0.1)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size * args.split, gamma=0.1)
 
+    # score logging
     score_log = torch.FloatTensor([])
+    
+    # training
     for epoch in range(args.epochs):
-        features_g, features_p, _ = extract_all_features(model, cluster_loader)
-        features_g = torch.cat([features_g[f].unsqueeze(0) for f, _, _ in sorted(dataset.train)], 0)
-        features_p = torch.cat([features_p[f].unsqueeze(0) for f, _, _ in sorted(dataset.train)], 0)
+        # shuffle all train data
+        np.random.shuffle(dataset.train)
 
+        # define DBSCAN cluster method
         if epoch == 0:
-            cluster = DBSCAN(eps=args.eps, min_samples=4, metric='precomputed', n_jobs=8)
+            cluster = DBSCAN(eps=args.eps, min_samples=args.min_samples, metric='precomputed', n_jobs=8)
 
-        # assign pseudo-labels
-        pseudo_labels, num_class = compute_pseudo_labels(features_g, cluster, args.k1)
+        # split train data and train
+        for split_idx, split in enumerate(train_splits):
+            splitted_train_data = np.array(dataset.train)[split]
+            splitted_train_data = np.ndarray.tolist(splitted_train_data)
+            
+            # load splitted train data (to load data with less augmentations, only resize and normalization)
+            cluster_loader = get_test_loader(dataset, args.height, args.width, args.batch_size, args.workers,
+                                             testset=sorted(splitted_train_data))
+            # extract global feature & part features
+            features_g, features_p, _ = extract_all_features(model, cluster_loader)
 
-        # Compute the cross-agreement
-        score = compute_cross_agreement(features_g, features_p, k=args.k)
-        score_log = torch.cat([score_log, score.unsqueeze(0)], dim=0)
+            # aggregate global features & part features
+            features_g = torch.cat([features_g[f].unsqueeze(0) for f, _, _ in sorted(splitted_train_data)], 0)
+            features_p = torch.cat([features_p[f].unsqueeze(0) for f, _, _ in sorted(splitted_train_data)], 0)
 
-        # generate new dataset with pseudo-labels
-        num_outliers = 0
-        new_dataset = []
+            # assign pseudo-labels
+            pseudo_labels, num_class = compute_pseudo_labels(features_g, cluster, args.k1)
 
-        idxs, pids = [], []
-        for i, ((fname, _, cid), label) in enumerate(zip(sorted(dataset.train), pseudo_labels)):
-            pid = label.item()
-            if pid >= num_class:  # append data except outliers
-                num_outliers += 1
-            else:
-                new_dataset.append((fname, pid, cid))
-                idxs.append(i)
-                pids.append(pid)
+            # compute the cross-agreement score
+            score = compute_cross_agreement(features_g, features_p, k=args.k)
+            score_log = torch.cat([score_log, score.unsqueeze(0)], dim=0)
 
-        train_loader = get_train_loader(dataset, args.height, args.width, args.batch_size,
-                                        args.workers, args.num_instances, args.iters, trainset=new_dataset)
+            # generate new dataset with pseudo-labels
+            num_outliers = 0
+            new_dataset = []
 
-        # statistics of clusters and un-clustered instances
-        print('==> Statistics for epoch {}: {} clusters, {} un-clustered instances'.format(epoch, num_class,
-                                                                                           num_outliers))
+            idxs, pids = [], []
+            for i, ((fname, _, cid), label) in enumerate(zip(sorted(splitted_train_data), pseudo_labels)):
+                pid = label.item()
+                if pid >= num_class:
+                    num_outliers += 1
+                else:
+                    new_dataset.append((fname, pid, cid))
+                    idxs.append(i)
+                    pids.append(pid)
+                
+            train_loader = get_train_loader(dataset, args.height, args.width, args.batch_size, 
+                                                args.workers, args.num_instances, args.iters, trainset=new_dataset)
+            
+            # statistics of clusters and un-clustered instances
+            print('==> Statistics for epoch {}: {} clusters, {} un-clustered instances'.format(epoch, num_class,
+                                                                                            num_outliers))
+            
+            # reindex
+            idxs, pids = np.asarray(idxs), np.asarray(pids)
+            features_g = features_g[idxs, :]
+            features_p = features_p[idxs, :, :]
+            score = score[idxs, :]
 
-        # reindex
-        idxs, pids = np.asarray(idxs), np.asarray(pids)
-        features_g = features_g[idxs, :]
-        features_p = features_p[idxs, :, :]
-        score = score[idxs, :]
+            # compute cluster centroids
+            centroids_g, centroids_p = [], []
+            for pid in sorted(np.unique(pids)): # loop all pids
+                idxs_p = np.where(pids==pid)[0]
+                centroids_g.append(features_g[idxs_p].mean(0))
+                centroids_p.append(features_p[idxs_p].mean(0))
+            
+            centroids_g = F.normalize(torch.stack(centroids_g), p=2, dim=1)
+            model.module.classifier.weight.data[:num_class].copy_(centroids_g)
+            for i in range(num_part):
+                centroids_p_i = torch.stack(centroids_p)[:, :, i]
+                centroids_p_i = F.normalize(centroids_p_i, p=2, dim=1)
+                classifier_p_i = getattr(model.module, 'classifier' + str(i))
+                classifier_p_i.weight.data[:num_class].copy_(centroids_p_i)
 
-        # compute cluster centroids
-        centroids_g, centroids_p = [], []
-        for pid in sorted(np.unique(pids)):  # loop all pids
-            idxs_p = np.where(pids == pid)[0]
-            centroids_g.append(features_g[idxs_p].mean(0))
-            centroids_p.append(features_p[idxs_p].mean(0))
+            # training
+            trainer = PPLRTrainer(model, score, num_class=num_class, num_part=num_part, beta=args.beta,
+                                  aals_epoch=args.aals_epoch)
+            trainer.train(epoch, train_loader, optimizer, print_freq=args.print_freq, train_iters=len(train_loader))
+            lr_scheduler.step()
 
-        centroids_g = F.normalize(torch.stack(centroids_g), p=2, dim=1)
-        model.module.classifier.weight.data[:num_class].copy_(centroids_g)
-        for i in range(num_part):
-            centroids_p_i = torch.stack(centroids_p)[:, :, i]
-            centroids_p_i = F.normalize(centroids_p_i, p=2, dim=1)
-            classifier_p_i = getattr(model.module, 'classifier' + str(i))
-            classifier_p_i.weight.data[:num_class].copy_(centroids_p_i)
-
-        # training
-        trainer = PPLRTrainer(model, score, num_class=num_class, num_part=num_part, beta=args.beta,
-                              aals_epoch=args.aals_epoch)
-
-        trainer.train(epoch, train_loader, optimizer, print_freq=args.print_freq, train_iters=len(train_loader))
-        lr_scheduler.step()
-
-        # evaluation
-        if ((epoch+1) % args.eval_step == 0) or (epoch == args.epochs-1):
+        if ((epoch + 1) % args.eval_step == 0) or (epoch == args.epochs-1):
             mAP = evaluator.evaluate(test_loader, dataset.query, dataset.gallery, cmc_flag=False)
 
             if mAP > best_mAP:
                 best_mAP = mAP
                 torch.save(model.state_dict(), osp.join(args.logs_dir, 'best.pth'))
-            print('\n* Finished epoch {:3d}  model mAP: {:5.1%} best: {:5.1%}\n'.format(epoch, mAP, best_mAP))
-
+            torch.save(model.state_dict(), osp.join(args.logs_dir, f'PPLR_{epoch+1}.pth'))
+            print("\n* [Epoch:{:2d}/{:2d}][Split:{:2d}/{:2d}]: model mAP: {:5.1%}, best: {:5.1%}\n"\
+                    .format(epoch + 1, args.epochs, split_idx+1, args.split, mAP, best_mAP))
+        
     torch.save(model.state_dict(), osp.join(args.logs_dir, 'last.pth'))
     np.save(osp.join(args.logs_dir, 'scores.npy'), score_log.numpy())
 
-    # results
+    # best results
     model.load_state_dict(torch.load(osp.join(args.logs_dir, 'best.pth')))
     evaluator.evaluate(test_loader, dataset.query, dataset.gallery, cmc_flag=True)
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Part-based Pseudo Label Refinement")
@@ -274,6 +303,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--print-freq', type=int, default=10)
     parser.add_argument('--eval-step', type=int, default=5)
+    parser.add_argument('--split', type=int, default=10)
 
     # PPLR
     parser.add_argument('--part', type=int, default=3, help="number of part")
@@ -283,6 +313,10 @@ if __name__ == '__main__':
                         help="weighting parameter for part-guided label refinement")
     parser.add_argument('--aals-epoch', type=int, default=5,
                         help="starting epoch for agreement-aware label smoothing")
+    parser.add_argument('--min-samples', type=int, default=4,
+                        help="density based clustering min sample variable")
+    parser.add_argument('--num-classes', type=int, default=3000,
+                        help='number of the classifier classes')
 
     # optimizer
     parser.add_argument('--lr', type=float, default=0.00035, help="learning rate")

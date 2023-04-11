@@ -8,8 +8,8 @@ setup(name='PPLR',
       author_email='yoonki@kaist.ac.kr',
       url='https://github.com/yoonkicho/PPLR',
       install_requires=[
-          'numpy', 'torch', 'torchvision',
-          'six', 'h5py', 'Pillow', 'scipy',
+          #'numpy', 'torch', 'torchvision',
+          'six', 'h5py', 'Pillow', 'scipy', 'numpy',
           'scikit-learn', 'metric-learn', 'faiss_gpu==1.6.3'],
       packages=find_packages()
       )

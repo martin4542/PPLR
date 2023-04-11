@@ -63,7 +63,7 @@ def main_worker(args):
     dataset, test_loader = get_data(args.dataset, args.data_dir, args.height, args.width, args.batch_size, args.workers)
 
     # model
-    model = resnet50part(num_parts=args.part, num_classes=3000)
+    model = resnet50part(num_parts=args.part, num_classes=2000)
     model.cuda()
     model = nn.DataParallel(model)
 
