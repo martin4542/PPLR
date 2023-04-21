@@ -5,13 +5,15 @@ from .market1501 import Market1501
 from .msmt17 import MSMT17
 from .veri import VeRi
 from .ai_hub import AI_HUB
+from .ellexi_CCTV import Ellexi_CCTV
 
 
 __factory = {
     'market1501': Market1501,
     'msmt17': MSMT17,
     'veri': VeRi,
-    'aihub': AI_HUB
+    'aihub': AI_HUB,
+    'ellexi': Ellexi_CCTV
 }
 
 

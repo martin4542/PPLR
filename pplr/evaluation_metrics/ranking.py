@@ -113,3 +113,64 @@ def mean_ap(distmat, query_ids=None, gallery_ids=None,
     if len(aps) == 0:
         raise RuntimeError("No valid query")
     return np.mean(aps)
+
+
+def calc_map(distmat, query_ids=None, gallery_ids=None,
+             query_cams=None, gallery_cams=None):
+    distmat = to_numpy(distmat)
+    m, n = distmat.shape
+
+    # If query is none, fill up default valeus
+    if query_ids is None: query_ids = np.arange(m)
+    if query_cams is None: gallery_ids = np.arange(n)
+    if gallery_ids is None: gallery_ids = np.arange(m).astype(np.int32)
+    if gallery_cams is None: gallery_cams = np.arange(n).astype(np.int32)
+
+    # Ensure numpy array
+    query_ids = np.asarray(query_ids)
+    query_cams = np.asarray(query_cams)
+    gallery_ids = np.asarray(gallery_ids)
+    gallery_cams = np.asarray(gallery_cams)
+
+    # Sort and find correct matches
+    indices = np.argsort(distmat, axis=1)
+    matches = (gallery_ids[indices] == query_ids[:, np.newaxis])
+
+    # Compute average percision
+    mAP = 0
+    div = np.arange(1, n+1)
+    for i in range(m):
+        score = matches[i].cumsum() / div
+        score *= matches[i]
+        mAP += sum(score) / sum(matches[i])
+    return mAP / m
+
+
+def calc_topk(distmat, query_ids=None, gallery_ids=None,
+              query_cams=None, gallery_cams=None, top_k=[1,5,10]):
+    distmat = to_numpy(distmat)
+    m, n = distmat.shape
+
+    # If query is None, fill up default values
+    if query_ids is None: query_ids = np.arange(m)
+    if query_cams is None: query_cams = np.arange(n)
+    if gallery_ids is None: gallery_ids = np.arange(m).astype(np.int32)
+    if gallery_cams is None: gallery_cams = np.arange(n).astype(np.int32)
+
+    # Ensure numpy array
+    query_ids = np.asarray(query_ids)
+    query_cams = np.asarray(query_cams)
+    gallery_ids = np.asarray(gallery_ids)
+    gallery_cams = np.asarray(gallery_cams)
+
+    # Sort and find correct matches
+    indices = np.argsort(distmat, axis=1)
+    matches = (gallery_ids[indices] == query_ids[:, np.newaxis])
+
+    top_k_acc = np.zeros((n, ))
+    for i in range(m):
+        start = np.where(matches[i] > 0)[0][0]
+        score = np.zeros((n, ))
+        score[start:] = 1
+        top_k_acc += score
+    return top_k_acc / m

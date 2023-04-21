@@ -157,6 +157,7 @@ def main_worker(args):
     splits = [(num_of_train // args.split) * (i + 1) for i in range(args.split)]
     if splits[-1] == num_of_train:
         train_splits = np.split(train_idxes, splits)[:-1]
+        
     else:
         splits.append(num_of_train)
         train_splits = np.split(train_idxes, splits)[:-2]

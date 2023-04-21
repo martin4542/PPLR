@@ -9,6 +9,7 @@ import random
 import copy
 
 from .evaluation_metrics import cmc, mean_ap
+from .evaluation_metrics import calc_map, calc_topk
 from .utils.meters import AverageMeter
 from .utils.rerank import re_ranking
 from .utils import to_torch
@@ -125,25 +126,33 @@ def evaluate_all(query_features, gallery_features, distmat, query=None, gallery=
         assert (query_ids is not None and gallery_ids is not None
                 and query_cams is not None and gallery_cams is not None)
 
-    # Compute mean AP
-    mAP = mean_ap(distmat, query_ids, gallery_ids, query_cams, gallery_cams)
-    print('Mean AP: {:4.1%}'.format(mAP))
+    # Compute mean average precision
+    mAP = calc_map(distmat, query_ids, gallery_ids, query_cams, gallery_cams)
+    print("Mean AP : {:4.5%}".format(mAP))
+
+    # # Compute mean AP
+    # mAP = mean_ap(distmat, query_ids, gallery_ids, query_cams, gallery_cams)
+    # print('Mean AP: {:4.1%}'.format(mAP))
 
     if (not cmc_flag):
         return mAP
 
-    cmc_configs = {
-        'market1501': dict(separate_camera_set=False,
-                           single_gallery_shot=False,
-                           first_match_break=True),}
-    cmc_scores = {name: cmc(distmat, query_ids, gallery_ids,
-                            query_cams, gallery_cams, **params)
-                  for name, params in cmc_configs.items()}
-
-    print('CMC Scores:')
+    top_k_acc = calc_topk(distmat, query_ids, gallery_ids, query_cams, gallery_cams)
     for k in cmc_topk:
-        print('  top-{:<4}{:12.1%}'.format(k, cmc_scores['market1501'][k-1]))
-    return cmc_scores['market1501'], mAP
+        print('  top-{:<4}{:12.5%}'.format(k, top_k_acc[k-1]))
+
+    # cmc_configs = {
+    #     'market1501': dict(separate_camera_set=False,
+    #                        single_gallery_shot=False,
+    #                        first_match_break=True),}
+    # cmc_scores = {name: cmc(distmat, query_ids, gallery_ids,
+    #                         query_cams, gallery_cams, **params)
+    #               for name, params in cmc_configs.items()}
+
+    # print('CMC Scores:')
+    # for k in cmc_topk:
+    #     print('  top-{:<4}{:12.1%}'.format(k, cmc_scores['market1501'][k-1]))
+    return top_k_acc, mAP
 
 
 class Evaluator(object):

@@ -88,8 +88,6 @@ class AI_HUB(BaseImageDataset):
                 self.camid_map[camid] = camid_idx
                 camid_idx += 1
 
-        pid_idx = 0
-
         for idx in range(max(len(self.val_pids), len(self.val_camids))):
             id = self.val_pids[idx] if idx < len(self.val_pids) else None
             camid = self.val_camids[idx] if idx < len(self.val_camids) else None

@@ -22,7 +22,11 @@ from pplr.utils.serialization import load_checkpoint, copy_state_dict
 def get_data(name, data_dir, height, width, batch_size, workers):
     root = data_dir
 
-    dataset = datasets.create(name, root)
+    if name == "ellexi":
+        dataset = datasets.create(name, root, dates=["2023-03-30", "2023-03-29"])
+    else:
+        dataset = datasets.create(name, root)
+
     normalizer = T.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
     test_transformer = T.Compose([
@@ -63,7 +67,7 @@ def main_worker(args):
     dataset, test_loader = get_data(args.dataset, args.data_dir, args.height, args.width, args.batch_size, args.workers)
 
     # model
-    model = resnet50part(num_parts=args.part, num_classes=2000)
+    model = resnet50part(num_parts=args.part, num_classes=args.classes)
     model.cuda()
     model = nn.DataParallel(model)
 
@@ -97,6 +101,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=1)
 
     # model configs
+    parser.add_argument('--classes', type=int, default=2000, help="number of classes")
     parser.add_argument('--part', type=int, default=3, help="number of part")
 
     main()
